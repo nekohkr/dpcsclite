@@ -84,6 +84,12 @@ interface CardReader extends EventEmitter {
     res_len: number,
     cb: (err: AnyOrNothing, response: Buffer) => void
   ): void;
+  beginTransaction(
+    cb: (err: AnyOrNothing) => void
+  ): void;
+  endTransaction(
+    cb: (err: AnyOrNothing) => void
+  ): void;
   close(): void;
 }
 

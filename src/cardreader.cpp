@@ -23,6 +23,8 @@ void CardReader::init(Local<Object> target) {
     Nan::SetPrototypeTemplate(tpl, "_disconnect", Nan::New<FunctionTemplate>(Disconnect));
     Nan::SetPrototypeTemplate(tpl, "_transmit", Nan::New<FunctionTemplate>(Transmit));
     Nan::SetPrototypeTemplate(tpl, "_control", Nan::New<FunctionTemplate>(Control));
+    Nan::SetPrototypeTemplate(tpl, "_beginTransaction", Nan::New<FunctionTemplate>(BeginTransaction));
+    Nan::SetPrototypeTemplate(tpl, "_endTransaction", Nan::New<FunctionTemplate>(EndTransaction));
     Nan::SetPrototypeTemplate(tpl, "close", Nan::New<FunctionTemplate>(Close));
 
     // PCSCLite constants
@@ -298,6 +300,45 @@ NAN_METHOD(CardReader::Control) {
 
 }
 
+
+NAN_METHOD(CardReader::BeginTransaction) {
+
+    Nan::HandleScope scope;
+
+    if (!info[0]->IsFunction()) {
+        return Nan::ThrowError("First argument must be a callback function");
+    }
+
+    Local<Object> buffer_data = Nan::To<Object>(info[0]).ToLocalChecked();
+    Local<Function> cb = Local<Function>::Cast(info[1]);
+
+    // This creates our work request, including the libuv struct.
+    Baton* baton = new Baton();
+    baton->request.data = baton;
+    baton->callback.Reset(cb);
+    baton->reader = Nan::ObjectWrap::Unwrap<CardReader>(info.This());
+
+    // Schedule our work request with libuv. Here you can specify the functions
+    // that should be executed in the threadpool and back in the main thread
+    // after the threadpool function completed.
+    int status = uv_queue_work(uv_default_loop(),
+                               &baton->request,
+                               DoBeginTransaction,
+                               reinterpret_cast<uv_after_work_cb>(AfterBeginTransaction));
+    assert(status == 0);
+}
+
+NAN_METHOD(CardReader::EndTransaction) {
+    Nan::HandleScope scope;
+
+    LONG result = SCARD_S_SUCCESS;
+    CardReader* obj = Nan::ObjectWrap::Unwrap<CardReader>(info.This());
+
+    result = SCardEndTransaction(obj->m_status_card_context, SCARD_LEAVE_CARD);
+
+    info.GetReturnValue().Set(Nan::New<Number>(result));
+}
+
 NAN_METHOD(CardReader::Close) {
 
     Nan::HandleScope scope;
@@ -546,6 +587,34 @@ void CardReader::AfterDisconnect(uv_work_t* req, int status) {
     delete baton;
 }
 
+void CardReader::AfterBeginTransaction(uv_work_t* req, int status) {
+
+    Nan::HandleScope scope;
+    Baton* baton = static_cast<Baton*>(req->data);
+    LONG* result = reinterpret_cast<LONG*>(baton->result);
+
+    if (*result) {
+        Local<Value> err = Nan::Error(error_msg("SCardBeginTransaction", *result).c_str());
+
+        // Prepare the parameters for the callback function.
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { err };
+        Nan::Call(Nan::Callback(Nan::New(baton->callback)), argc, argv);
+    } else {
+        Nan::Set(baton->reader->handle(), Nan::New(connected_symbol), Nan::False());
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = {
+            Nan::Null()
+        };
+
+        Nan::Call(Nan::Callback(Nan::New(baton->callback)), argc, argv);
+    }
+
+    baton->callback.Reset();
+    delete result;
+    delete baton;
+}
+
 void CardReader::DoTransmit(uv_work_t* req) {
 
     Baton* baton = static_cast<Baton*>(req->data);
@@ -607,6 +676,31 @@ void CardReader::AfterTransmit(uv_work_t* req, int status) {
     delete [] tr->data;
     delete tr;
     delete baton;
+}
+
+
+void CardReader::DoBeginTransaction(uv_work_t* req) {
+
+    Baton* baton = static_cast<Baton*>(req->data);
+    CardReader* obj = baton->reader;
+
+    TransmitResult *tr = new TransmitResult();
+
+    LONG result = SCARD_E_INVALID_HANDLE;
+
+    /* Lock mutex */
+    uv_mutex_lock(&obj->m_mutex);
+    /* Connected? */
+    if (obj->m_card_handle) {
+        result = SCardBeginTransaction(obj->m_card_handle);
+    }
+
+    /* Unlock the mutex */
+    uv_mutex_unlock(&obj->m_mutex);
+
+    tr->result = result;
+
+    baton->result = tr;
 }
 
 void CardReader::DoControl(uv_work_t* req) {
